@@ -1,0 +1,6 @@
+Invoking command in '/home/sparsh/ros2_chat/build/ros2_chat': CMAKE_PREFIX_PATH=/opt/ros/humble /usr/bin/cmake /home/sparsh/ros2_chat -DCMAKE_INSTALL_PREFIX=/home/sparsh/ros2_chat/install/ros2_chat
+Invoked command in '/home/sparsh/ros2_chat/build/ros2_chat' returned '0': CMAKE_PREFIX_PATH=/opt/ros/humble /usr/bin/cmake /home/sparsh/ros2_chat -DCMAKE_INSTALL_PREFIX=/home/sparsh/ros2_chat/install/ros2_chat
+Invoking command in '/home/sparsh/ros2_chat/build/ros2_chat': CMAKE_PREFIX_PATH=/opt/ros/humble /usr/bin/cmake --build /home/sparsh/ros2_chat/build/ros2_chat -- -j16 -l16
+Invoked command in '/home/sparsh/ros2_chat/build/ros2_chat' returned '0': CMAKE_PREFIX_PATH=/opt/ros/humble /usr/bin/cmake --build /home/sparsh/ros2_chat/build/ros2_chat -- -j16 -l16
+Invoking command in '/home/sparsh/ros2_chat/build/ros2_chat': CMAKE_PREFIX_PATH=/opt/ros/humble /usr/bin/cmake --install /home/sparsh/ros2_chat/build/ros2_chat
+Invoked command in '/home/sparsh/ros2_chat/build/ros2_chat' returned '0': CMAKE_PREFIX_PATH=/opt/ros/humble /usr/bin/cmake --install /home/sparsh/ros2_chat/build/ros2_chat
