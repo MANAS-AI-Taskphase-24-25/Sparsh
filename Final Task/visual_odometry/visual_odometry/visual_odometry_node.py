@@ -10,11 +10,11 @@ import cv2
 import numpy as np
 import os
 import math
-from tf_transformations import quaternion_from_matrix
+from tf_transformations import quaternion_from_matrix,quaternion_from_euler
 import glob
 
 MAX_FRAME = 25761
-MIN_NUM_FEAT = 2200
+MIN_NUM_FEAT = 2500
 
 class VisualOdometryNode(Node):
     def __init__(self):
@@ -93,6 +93,8 @@ class VisualOdometryNode(Node):
         return points1_good, points2_good
     
     def process_image(self):
+        
+        # Stop if the maximum frame count is reached or end of image files
         if self.frame_count >= len(self.image_files) or self.frame_count >= MAX_FRAME:
             self.get_logger().info('Reached maximum frame count or end of images, stopping.')
             self.timer.cancel()
@@ -103,17 +105,20 @@ class VisualOdometryNode(Node):
         # Read current image
         img_path = self.image_files[self.frame_count]
         curr_img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+        
+        # Handle failure to read image
         if curr_img is None:
             self.get_logger().error(f'Failed to read image: {img_path}')
             self.frame_count += 1
             return
 
-        # Publish image
+        # Publish the image
         img_msg = self.bridge.cv2_to_imgmsg(curr_img, encoding='mono8')
         img_msg.header.stamp = self.get_clock().now().to_msg()
         img_msg.header.frame_id = 'camera'
         self.image_pub.publish(img_msg)
 
+        # Initial frame setup
         if self.prev_img is None:
             self.prev_img = curr_img
             self.prev_pts = self.feature_detection(curr_img)
@@ -123,19 +128,25 @@ class VisualOdometryNode(Node):
             self.frame_count += 1
             return
 
+        # Feature tracking
         p0, p1 = self.feature_tracking(self.prev_img, curr_img, self.prev_pts)
+        
+        # Calculate essential matrix and pose recovery
         E, mask = cv2.findEssentialMat(p1, p0, focal=self.focal, pp=self.pp, method=cv2.RANSAC, prob=0.999, threshold=1.0)
         _, R, t, mask = cv2.recoverPose(E, p1, p0, focal=self.focal, pp=self.pp)
         
+        # Update rotation buffer
         self.rotation_buffer.append(self.R_f.copy())
         if len(self.rotation_buffer) > 5:
             self.rotation_buffer.pop(0)
 
+        # Calculate relative rotation angle
         R_ref = self.rotation_buffer[0]
         R_delta = np.dot(self.R_f, R_ref.T)
         angle_rad = np.arccos(np.clip((np.trace(R_delta) - 1) / 2.0, -1.0, 1.0))
         angle_deg = np.degrees(angle_rad)
-    
+        
+        # Skip large rotations (if any)
         scale = 1.0
         if angle_deg > 130.0:
             self.get_logger().warn(f'Skipping frame {self.frame_count} due to large rotation angle: {angle_deg:.2f}°')
@@ -143,34 +154,59 @@ class VisualOdometryNode(Node):
             self.prev_pts = self.feature_detection(curr_img)
             self.frame_count += 1
             return
+        
         self.get_logger().info(f'Frame {self.frame_count}: ΔRotation = {angle_deg:.2f}°, Scale = {scale}, t = {t.flatten()}')
-        # Example: artificially scale the angle of rotation
+
+        # Apply artificial scaling to the rotation (optional)
         angle_scale_factor = 1  # You can tweak this to 1.5, 2.0, etc.
 
-        # Convert R to axis-angle
+        # Convert rotation matrix to axis-angle
         rvec, _ = cv2.Rodrigues(R)
         rvec = rvec * angle_scale_factor  # Scale the rotation vector
         R, _ = cv2.Rodrigues(rvec)  # Convert back to rotation matrix
 
-        if scale > 0.0:
-            self.t_f = self.t_f + scale * np.dot(self.R_f, t)
-            self.R_f = np.dot(R, self.R_f)
+        # Update translation and rotation
+        self.t_f = self.t_f + scale * np.dot(self.R_f, t)
+        self.R_f = np.dot(R, self.R_f)
 
         self.get_logger().info(f't_f: x={self.t_f[0][0]:.2f}, y={self.t_f[1][0]:.2f}, z={self.t_f[2][0]:.2f}')
 
+        # Feature re-detection if there are too few features
         if len(p0) < MIN_NUM_FEAT:
             self.prev_pts = self.feature_detection(self.prev_img)
             self.prev_pts, _ = self.feature_tracking(self.prev_img, curr_img, self.prev_pts)
         else:
             self.prev_pts = p1
 
-        # ---- Coordinate transform: OpenCV to ROS ----
+        # Coordinate transform: OpenCV to ROS (z to x, x to -y)
         t_cv = self.t_f.flatten()
         t_ros = np.array([
             t_cv[2],     # x ← z (forward)
             -t_cv[0],    # y ← -x (right → left)
-            t_cv[1]      # z ← y (down → up)
+            0.0     # z ← y (down → up)
         ])
+
+        # ---- Initialize q with identity quaternion ----
+        q = [0.0, 0.0, 0.0, 1.0]  # Identity quaternion (default)
+
+        # ---- Align odometry with the path ----
+        # You can align your odometry with the path by adjusting the robot's orientation
+        # based on the direction of movement along the path.
+        
+        if len(self.path.poses) > 1:
+            prev_pose = self.path.poses[-1].pose.position
+            curr_pose = Pose()
+            curr_pose.position.x = t_ros[0]
+            curr_pose.position.y = t_ros[1]
+            
+            # Calculate the direction vector from the previous position to the current position
+            direction = np.array([curr_pose.position.x - prev_pose.x, curr_pose.position.y - prev_pose.y])
+
+            # Calculate the angle between the x-axis and the direction vector
+            angle = np.arctan2(direction[1], direction[0])
+
+            # Create a quaternion from the angle to align the odometry with the path
+            q = quaternion_from_euler(0, 0, angle)
 
         # ---- Odometry message ----
         odom_msg = Odometry()
@@ -178,11 +214,7 @@ class VisualOdometryNode(Node):
         odom_msg.header.frame_id = 'odom'
         odom_msg.child_frame_id = 'base_link'
 
-        homog = np.eye(4)
-        homog[:3, :3] = self.R_f
-        homog[:3, 3] = self.t_f.flatten()
-        q = quaternion_from_matrix(homog)
-
+        # Set position and orientation in odometry message
         odom_msg.pose.pose.position.x = float(t_ros[0])
         odom_msg.pose.pose.position.y = float(t_ros[1])
         odom_msg.pose.pose.position.z = float(t_ros[2])
@@ -190,6 +222,8 @@ class VisualOdometryNode(Node):
         odom_msg.pose.pose.orientation.y = q[1]
         odom_msg.pose.pose.orientation.z = q[2]
         odom_msg.pose.pose.orientation.w = q[3]
+        
+        # Publish the odometry message
         odom_msg.twist.twist = Twist()
         self.odom_pub.publish(odom_msg)
 
@@ -209,7 +243,7 @@ class VisualOdometryNode(Node):
         tf_msg.transforms.append(transform)
         self.tf_pub.publish(tf_msg)
 
-        # ---- Path publishing (also in x-y plane of ROS) ----
+        # ---- Path publishing (x-y plane) ----
         pose = PoseStamped()
         pose.header.stamp = img_msg.header.stamp
         pose.header.frame_id = 'odom'
@@ -221,10 +255,14 @@ class VisualOdometryNode(Node):
         self.path.header.stamp = img_msg.header.stamp
         self.path_pub.publish(self.path)
 
-        self.get_logger().info(f'Path pose: x={pose.pose.position.x:.2f}, y={pose.pose.position.y:.2f}, z={pose.pose.position.z:.2f}')
+        self.get_logger().info(f'Path pose: x={pose.pose.position.x:.2f}, y={pose.pose.position.y:.2f}, z={pose.pose.position.z:.2f},{q}')
 
+        # Update previous image and feature points for next iteration
         self.prev_img = curr_img
         self.frame_count += 1
+
+
+
 
         # if self.show_trajectory:
         #     x = int(self.t_f[0]) + 500
